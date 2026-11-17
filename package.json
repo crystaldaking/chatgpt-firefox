@@ -1,0 +1,24 @@
+{
+  "name": "chatgpt-firefox",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "engines": { "node": ">=24" },
+  "workspaces": ["extension", "native-host", "mcp-server", "protocol"],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && node --test tests/*.test.mjs",
+    "test:firefox": "npm run build && node tests/firefox-e2e.mjs",
+    "check": "npm run typecheck && npm test",
+    "install:local": "node scripts/install-host.mjs",
+    "uninstall:local": "node scripts/install-host.mjs --remove"
+  },
+  "devDependencies": {
+    "@types/firefox-webext-browser": "^143.0.1",
+    "@types/node": "^24.0.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.9.3"
+  }
+}

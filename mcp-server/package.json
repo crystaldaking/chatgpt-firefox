@@ -1,0 +1,10 @@
+{
+  "name": "@chatgpt-firefox/mcp-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@chatgpt-firefox/protocol": "0.1.0",
+    "@modelcontextprotocol/sdk": "^1.32.2"
+  }
+}

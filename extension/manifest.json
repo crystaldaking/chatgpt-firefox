@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Firefox Workspace for Codex",
+  "version": "0.1.0",
+  "description": "Give local Codex a dedicated group of Firefox tabs.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "chatgpt-firefox@crystaldaking.github.io",
+      "strict_min_version": "160.0",
+      "data_collection_permissions": {
+        "required": ["browsingActivity", "websiteContent", "websiteActivity"]
+      }
+    }
+  },
+  "permissions": ["nativeMessaging", "scripting", "tabGroups", "tabs", "menus"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "background": { "scripts": ["background.js"] },
+  "action": { "default_title": "Firefox Workspace for Codex", "default_popup": "popup.html" }
+}

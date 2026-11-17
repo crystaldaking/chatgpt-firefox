@@ -1,0 +1,9 @@
+{
+  "name": "@chatgpt-firefox/native-host",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@chatgpt-firefox/protocol": "0.1.0"
+  }
+}
