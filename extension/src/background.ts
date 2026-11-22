@@ -12,6 +12,7 @@ browser.runtime.onMessage.addListener((message, sender) => {
 async function handlePopup(message: { type?: unknown; windowId?: unknown; origin?: unknown }) {
   try {
     if (message.type === "connect" && typeof message.windowId === "number") await workspace.connect(message.windowId);
+    if (message.type === "retry") workspace.retry();
     if (message.type === "stop") workspace.stop();
     if (message.type === "approve" && typeof message.origin === "string") await workspace.approve(message.origin);
     if (message.type === "revoke" && typeof message.origin === "string") await workspace.revoke(message.origin);

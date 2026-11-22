@@ -1,6 +1,6 @@
 import { lstat, unlink } from "node:fs/promises";
 import { createConnection, createServer, type Socket } from "node:net";
-import { EXTENSION_ID, changesPage, requestSchema, responseSchema, type Request, type Response } from "@chatgpt-firefox/protocol";
+import { EXTENSION_ID, changesPage, nativeReady, requestSchema, responseSchema, type Request, type Response } from "@chatgpt-firefox/protocol";
 import { FrameReader, frame, socketPath } from "@chatgpt-firefox/protocol/socket";
 
 // Firefox passes the add-on ID after the path to the native host manifest.
@@ -113,6 +113,7 @@ try {
   process.stdout.on("error", stop);
   process.on("SIGTERM", stop);
   process.on("SIGINT", stop);
+  process.stdout.write(frame(nativeReady));
 } catch (error) {
   console.error(error instanceof Error ? error.message : "Could not start the Firefox bridge.");
   process.exitCode = 1;

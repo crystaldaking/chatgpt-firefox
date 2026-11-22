@@ -35,19 +35,26 @@ test("Local MCP tools report disconnection and round-trip through the native hos
     });
     let buffer = Buffer.alloc(0);
     let forwarded = 0;
+    let receivedReady = false;
     host.stdout.on("data", chunk => {
       buffer = Buffer.concat([buffer, chunk]);
-      if (buffer.length < 4) return;
-      const length = buffer.readUInt32LE();
-      if (buffer.length < length + 4) return;
-      const request = JSON.parse(buffer.subarray(4, length + 4).toString());
-      buffer = buffer.subarray(length + 4);
-      assert.equal(request.method, "firefox_status");
-      assert.equal(request.version, 1);
-      forwarded++;
-      const reply = encode({ id: request.id, ok: true, result: { connected: true, grouped: false } });
-      host.stdin.write(reply.subarray(0, 2));
-      host.stdin.write(reply.subarray(2));
+      while (buffer.length >= 4) {
+        const length = buffer.readUInt32LE();
+        if (buffer.length < length + 4) return;
+        const message = JSON.parse(buffer.subarray(4, length + 4).toString());
+        buffer = buffer.subarray(length + 4);
+        if (!receivedReady) {
+          assert.deepEqual(message, { kind: "ready", version: 1 });
+          receivedReady = true;
+          continue;
+        }
+        assert.equal(message.method, "firefox_status");
+        assert.equal(message.version, 1);
+        forwarded++;
+        const reply = encode({ id: message.id, ok: true, result: { connected: true, grouped: false } });
+        host.stdin.write(reply.subarray(0, 2));
+        host.stdin.write(reply.subarray(2));
+      }
     });
     let reply;
     for (let attempt = 0; attempt < 30; attempt++) {

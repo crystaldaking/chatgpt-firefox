@@ -1,23 +1,36 @@
 import { hostPattern, webUrl } from "@chatgpt-firefox/protocol";
+import type { Workspace } from "./workspace.js";
 
-type Status = { connected: boolean; grouped: boolean; approved: string[]; pending: string[]; ok: boolean; message?: string };
+type Status = ReturnType<Workspace["status"]> & { ok: boolean };
 const connection = document.querySelector<HTMLButtonElement>("#connection")!;
+const retry = document.querySelector<HTMLButtonElement>("#retry")!;
 const statusText = document.querySelector<HTMLElement>("#status")!;
 const message = document.querySelector<HTMLElement>("#message")!;
 const sites = document.querySelector<HTMLUListElement>("#sites")!;
-let connected = false;
+let accessActive = false;
 let activeRequest = false;
 let renderedSites = "";
+let actionMessage = "";
 
 async function command(input: object): Promise<Status> {
   return await browser.runtime.sendMessage(input) as Status;
 }
 
 function render(status: Status): void {
-  connected = status.connected;
-  statusText.textContent = connected ? (status.grouped ? "Codex group ready" : "Waiting for a workspace tab") : "Disconnected";
-  connection.textContent = connected ? "Stop access" : "Connect Codex";
-  if (!activeRequest) connection.disabled = false;
+  const statuses: Record<Status["connection"], string> = {
+    stopped: "Disconnected",
+    connecting: "Starting the local bridge…",
+    connected: status.grouped ? "Codex group ready" : "Waiting for a workspace tab",
+    reconnecting: "Restoring the local bridge…",
+    unavailable: "Local bridge unavailable",
+  };
+  accessActive = status.connection !== "stopped";
+  statusText.textContent = statuses[status.connection];
+  connection.textContent = accessActive ? "Stop access" : "Connect Codex";
+  retry.hidden = status.connection !== "unavailable";
+  connection.disabled = activeRequest;
+  retry.disabled = activeRequest;
+  message.textContent = actionMessage || status.message || "";
   const siteList = JSON.stringify([status.pending, status.approved]);
   if (renderedSites === siteList) return;
   renderedSites = siteList;
@@ -35,7 +48,7 @@ function render(status: Status): void {
       void update(async () => {
         if (approved) return command({ type: "revoke", origin });
         const granted = await browser.permissions.request({ origins: [hostPattern(webUrl(origin))] });
-        return granted ? command({ type: "approve", origin }) : { ...status, message: "Site permission was declined." };
+        return granted ? command({ type: "approve", origin }) : { ...status, ok: false, message: "Site permission was declined." };
       });
     });
     item.append(label, button);
@@ -47,25 +60,33 @@ function render(status: Status): void {
 async function update(action: () => Promise<Status>): Promise<void> {
   activeRequest = true;
   connection.disabled = true;
+  retry.disabled = true;
+  actionMessage = "";
   try {
     const status = await action();
+    if (!status.ok) actionMessage = status.message ?? "";
     render(status);
-    message.textContent = status.message ?? "";
   } catch {
-    message.textContent = "Could not contact the extension.";
+    actionMessage = "Could not contact the extension.";
+    message.textContent = actionMessage;
   } finally {
     activeRequest = false;
     connection.disabled = false;
+    retry.disabled = false;
   }
 }
 
 connection.addEventListener("click", () => {
   if (activeRequest) return;
   void update(async () => {
-    if (connected) return command({ type: "stop" });
+    if (accessActive) return command({ type: "stop" });
     const window = await browser.windows.getCurrent();
     return command({ type: "connect", windowId: window.id });
   });
+});
+
+retry.addEventListener("click", () => {
+  if (!activeRequest) void update(() => command({ type: "retry" }));
 });
 
 async function refresh(): Promise<void> {
@@ -74,7 +95,6 @@ async function refresh(): Promise<void> {
     const status = await command({ type: "status" });
     if (activeRequest) return;
     render(status);
-    if (status.message) message.textContent = status.message;
   } catch {
     message.textContent = "Could not contact the extension.";
   }

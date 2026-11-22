@@ -33,7 +33,9 @@ For example, ask “Open https://example.org in the Firefox workspace and tell m
 
 Use **Share or return tab in Codex workspace** from a Firefox tab's context menu to give Codex access or take the tab back. Select **Stop access** in the extension to disconnect and leave the tabs open.
 
-The temporary add-on needs to be loaded again after restarting Firefox. This version is distributed as source.
+If the local bridge exits unexpectedly, Firefox tries to restore the connection to the same workspace. Use **Retry connection** in the popup if the bridge remains unavailable. When Codex reports an unknown outcome after a disconnect, check the affected tab before repeating the action.
+
+After updating the source, run `npm run build` and reload the temporary add-on in `about:debugging` so Firefox and the local bridge use the same build. Load the temporary add-on again after restarting Firefox. This version is distributed as source.
 
 ## Permissions and data
 

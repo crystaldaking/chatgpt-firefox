@@ -1,13 +1,24 @@
 import {
-  NATIVE_HOST_NAME, OperationError, hostPattern, requestSchema, webUrl, type Request, type Response,
+  NATIVE_HOST_NAME, OperationError, hostPattern, nativeReadySchema, requestSchema, webUrl, type Request, type Response,
 } from "@chatgpt-firefox/protocol";
 import { runPageTask } from "./page.js";
 
 type Entry = { handle: string; tabId: number; opened: boolean; previousGroup: number | undefined };
+type Bridge = {
+  port: browser.runtime.Port;
+  ready: boolean;
+  startupTimer: ReturnType<typeof setTimeout>;
+  lifetime: AbortController;
+};
+type ConnectionState = "stopped" | "connecting" | "connected" | "reconnecting" | "unavailable";
 type Session = {
   windowId: number;
   groupId?: number;
-  port: browser.runtime.Port;
+  bridge?: Bridge;
+  requestBridge?: Bridge;
+  retryTimer?: ReturnType<typeof setTimeout>;
+  retryCount: number;
+  hasConnected: boolean;
   entries: Map<string, Entry>;
   approved: Set<string>;
   pending: Set<string>;
@@ -16,20 +27,25 @@ type Session = {
 
 const noConnection = () => new OperationError("DISCONNECTED", "Select Connect Codex in the Firefox extension.");
 const outOfScope = () => new OperationError("OUT_OF_SCOPE", "The tab is outside the current Firefox workspace.");
+const reconnectDelays = [300, 1000, 2500];
 
 export class Workspace {
   private session?: Session;
-  private connectionError?: string;
 
   status() {
     const session = this.session;
+    let connection: ConnectionState = "stopped";
+    if (session?.bridge?.ready) connection = "connected";
+    else if (session?.bridge || session?.retryTimer !== undefined) connection = session.hasConnected ? "reconnecting" : "connecting";
+    else if (session) connection = "unavailable";
     return {
-      connected: Boolean(session),
+      connected: connection === "connected",
+      connection,
       windowId: session?.windowId,
       grouped: session?.groupId !== undefined,
       approved: [...session?.approved ?? []],
       pending: [...session?.pending ?? []],
-      message: this.connectionError,
+      message: connection === "unavailable" ? "Check the native host installation and select Retry connection." : undefined,
     };
   }
 
@@ -38,23 +54,76 @@ export class Workspace {
     if (window.type !== "normal" || window.incognito) throw outOfScope();
     if (this.session?.windowId === windowId) return;
     if (this.session) throw new OperationError("BUSY", "Stop the existing workspace before connecting another window.");
-    const port = browser.runtime.connectNative(NATIVE_HOST_NAME);
-    const session: Session = { windowId, port, entries: new Map(), approved: new Set(), pending: new Set(), busy: false };
+    const session: Session = {
+      windowId, entries: new Map(), approved: new Set(), pending: new Set(), busy: false,
+      retryCount: 0, hasConnected: false,
+    };
     this.session = session;
-    this.connectionError = undefined;
-    port.onMessage.addListener(value => { void this.onRequest(session, value); });
-    port.onDisconnect.addListener(() => {
-      if (this.session !== session) return;
-      this.session = undefined;
-      this.connectionError = "Firefox lost the local bridge. Check the native host installation and reconnect.";
-    });
+    this.openBridge(session);
+  }
+
+  retry(): void {
+    const session = this.current();
+    if (session.bridge || session.retryTimer !== undefined) return;
+    session.retryCount = 0;
+    this.openBridge(session);
   }
 
   stop(): void {
     const session = this.session;
     this.session = undefined;
-    this.connectionError = undefined;
-    session?.port.disconnect();
+    clearTimeout(session?.retryTimer);
+    if (session?.bridge) this.closeBridge(session.bridge);
+  }
+
+  private openBridge(session: Session): void {
+    let port: browser.runtime.Port;
+    try {
+      port = browser.runtime.connectNative(NATIVE_HOST_NAME);
+    } catch {
+      this.scheduleReconnect(session);
+      return;
+    }
+    const bridge: Bridge = {
+      port, ready: false, lifetime: new AbortController(),
+      startupTimer: setTimeout(() => this.bridgeLost(session, bridge, true), 5000),
+    };
+    session.bridge = bridge;
+    port.onMessage.addListener(value => {
+      if (this.session !== session || session.bridge !== bridge) return;
+      if (!bridge.ready) {
+        if (!nativeReadySchema.safeParse(value).success) return;
+        clearTimeout(bridge.startupTimer);
+        bridge.ready = true;
+        session.hasConnected = true;
+        return;
+      }
+      void this.onRequest(session, bridge, value);
+    });
+    port.onDisconnect.addListener(() => this.bridgeLost(session, bridge, false));
+  }
+
+  private closeBridge(bridge: Bridge, disconnectPort = true): void {
+    clearTimeout(bridge.startupTimer);
+    bridge.lifetime.abort();
+    if (disconnectPort) bridge.port.disconnect();
+  }
+
+  private bridgeLost(session: Session, bridge: Bridge, disconnectPort: boolean): void {
+    if (this.session !== session || session.bridge !== bridge) return;
+    session.bridge = undefined;
+    this.closeBridge(bridge, disconnectPort);
+    this.scheduleReconnect(session);
+  }
+
+  private scheduleReconnect(session: Session): void {
+    const delay = reconnectDelays[session.retryCount];
+    if (!session.hasConnected || delay === undefined) return;
+    session.retryCount++;
+    session.retryTimer = setTimeout(() => {
+      session.retryTimer = undefined;
+      if (this.session === session) this.openBridge(session);
+    }, delay);
   }
 
   windowClosed(windowId: number): void {
@@ -85,7 +154,7 @@ export class Workspace {
     if (!session.pending.has(url.origin) || !await browser.permissions.contains({ origins: [hostPattern(url)] })) {
       throw new OperationError("SITE_PERMISSION_REQUIRED", "Firefox has not approved this site.", url.origin);
     }
-    this.assertCurrent(session);
+    if (session !== this.session) throw noConnection();
     session.approved.add(url.origin);
     session.pending.delete(url.origin);
   }
@@ -144,19 +213,20 @@ export class Workspace {
   }
 
   private assertCurrent(session: Session, entry?: Entry): void {
-    if (session !== this.session) throw noConnection();
+    if (session !== this.session || session.requestBridge?.lifetime.signal.aborted) throw noConnection();
     if (entry && session.entries.get(entry.handle) !== entry) throw outOfScope();
   }
 
-  private async onRequest(session: Session, value: unknown): Promise<void> {
+  private async onRequest(session: Session, bridge: Bridge, value: unknown): Promise<void> {
     const parsed = requestSchema.safeParse(value);
     if (!parsed.success || this.session !== session) return;
     const request = parsed.data;
     if (session.busy) {
-      session.port.postMessage({ id: request.id, ok: false, error: { code: "BUSY", message: "A Firefox command is already in progress." } });
+      this.reply(session, bridge, { id: request.id, ok: false, error: { code: "BUSY", message: "A Firefox command is already in progress." } });
       return;
     }
     session.busy = true;
+    session.requestBridge = bridge;
     let response: Response;
     try {
       const result = await this.dispatch(session, request);
@@ -169,8 +239,19 @@ export class Workspace {
       response = { id: request.id, ok: false, error: reason.details() };
     } finally {
       session.busy = false;
+      session.requestBridge = undefined;
     }
-    if (this.session === session) session.port.postMessage(response);
+    this.reply(session, bridge, response);
+  }
+
+  private reply(session: Session, bridge: Bridge, response: Response): void {
+    if (this.session !== session || session.bridge !== bridge) return;
+    try {
+      bridge.port.postMessage(response);
+      session.retryCount = 0;
+    } catch {
+      this.bridgeLost(session, bridge, true);
+    }
   }
 
   private queueApproval(session: Session, origin: string): void {
@@ -238,6 +319,9 @@ export class Workspace {
     };
     browser.tabs.onUpdated.addListener(listener);
     const timer = setTimeout(() => loaded(false), 10_000);
+    const signal = session.requestBridge?.lifetime.signal;
+    const cancelWait = () => loaded(false);
+    signal?.addEventListener("abort", cancelWait, { once: true });
     try {
       this.assertCurrent(session, entry);
       if (!session.approved.has(url.origin)) throw new OperationError("SITE_PERMISSION_REQUIRED", "Approve the destination site.", url.origin);
@@ -250,6 +334,7 @@ export class Workspace {
     } finally {
       clearTimeout(timer);
       browser.tabs.onUpdated.removeListener(listener);
+      signal?.removeEventListener("abort", cancelWait);
     }
   }
 

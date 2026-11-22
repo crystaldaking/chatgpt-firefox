@@ -1,10 +1,12 @@
 import { strict as assert } from "node:assert";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
+import { createServer as createUnixServer } from "node:net";
 import { join, resolve } from "node:path";
+import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
@@ -19,6 +21,8 @@ let resolvePopup;
 const popupReady = new Promise(resolveReady => { resolvePopup = resolveReady; });
 let nextCommand, waitingPopup, resolveCommand;
 const activations = [];
+const slowNavigation = Promise.withResolvers();
+let slowRequests = 0;
 const server = createServer(async (request, response) => {
   if (request.url === "/command" && request.method === "GET") {
     if (nextCommand) {
@@ -46,6 +50,9 @@ const server = createServer(async (request, response) => {
     response.end('<title>Signed-in fixture</title><h1>Private test page</h1><input aria-label="Note" oninput="document.querySelector(\'output\').textContent=this.value"><input type="password" value="hidden-fixture"><output></output><a href="/done">Continue</a><a href="/done" target="_blank">New tab</a>');
   } else if (request.url === "/done") {
     response.end("<title>Complete</title><h1>Navigation succeeded</h1>");
+  } else if (request.url === "/slow") {
+    slowRequests++;
+    slowNavigation.resolve(response);
   } else {
     response.writeHead(403).end("Sign-in required");
   }
@@ -105,11 +112,19 @@ try {
       while (true) {
         const response = await fetch(endpoint + "/command");
         const command = await response.json();
-        const result = command.type === "inspect"
-          ? (await browser.tabGroups.query({ title: "Codex" })).map(group => ({ collapsed: group.collapsed }))
-          : command.type === "connect"
-          ? await browser.runtime.sendMessage({ type: "connect", windowId: (await browser.windows.getCurrent()).id })
-          : await browser.runtime.sendMessage(command);
+        let result;
+        if (command.type === "inspect") {
+          const groups = await browser.tabGroups.query({ title: "Codex" });
+          result = groups.map(group => ({ collapsed: group.collapsed }));
+        } else if (command.type === "connect") {
+          result = await browser.runtime.sendMessage({ type: "connect", windowId: (await browser.windows.getCurrent()).id });
+        } else if (command.type === "retry-control") {
+          const button = document.querySelector("#retry");
+          result = { ready: !button.hidden && !button.disabled };
+          if (command.click && result.ready) button.click();
+        } else {
+          result = await browser.runtime.sendMessage(command);
+        }
         await fetch(endpoint + "/reply", { method: "POST", body: JSON.stringify(result) });
       }
     })();`,
@@ -159,7 +174,7 @@ try {
   }
   await bidi("webExtension.install", { extensionData: { type: "path", path: addon } });
   await timeout(popupReady, "The extension did not start.");
-  assert.equal((await popupCommand({ type: "connect" })).connected, true);
+  assert.equal((await popupCommand({ type: "connect" })).ok, true);
   await client.connect(new StdioClientTransport({
     command: process.execPath, args: ["dist/mcp-server.mjs"], env, stderr: "inherit",
   }));
@@ -200,13 +215,58 @@ try {
   const { url: destination } = await call("navigate", { tab, url: origin + "/done" });
   assert.equal(destination, origin + "/done");
   assert.match((await call("snapshot", { tab })).text, /Navigation succeeded/);
+
+  const interrupted = client.callTool({ name: "firefox_navigate", arguments: { tab, url: origin + "/slow" } });
+  const response = await timeout(slowNavigation.promise, "Firefox did not start the slow navigation.");
+  // Limit process discovery to this temporary Firefox instance and its native host.
+  const { stdout } = await promisify(execFile)("/usr/bin/pgrep", ["-P", String(firefox.pid), "-f", resolve("dist/native-host.mjs")]);
+  assert.match(stdout.trim(), /^\d+$/);
+  process.kill(Number(stdout.trim()), "SIGKILL");
+  assert.equal((await interrupted).structuredContent?.code, "OUTCOME_UNKNOWN");
+  await poll(() => call("status"), value => value.connected, "native bridge recovery");
+  const recovered = await call("status");
+  assert.deepEqual(recovered.approved, [origin]);
+  assert.deepEqual((await call("list_tabs")).tabs.map(entry => entry.tab), [tab]);
+  response.end("<title>Recovered</title><h1>Slow navigation finished once</h1>");
+  const snapshot = await poll(
+    async () => (await client.callTool({ name: "firefox_snapshot", arguments: { tab } })).structuredContent,
+    result => result?.text?.includes("Slow navigation finished once"),
+    "the original navigation result",
+  );
+  assert.match(snapshot.text, /Slow navigation finished once/);
+  assert.equal(slowRequests, 1);
+  assert.deepEqual(await popupCommand({ type: "inspect" }), [{ collapsed: true }]);
   assert.equal(await evaluate('JSON.stringify([document.hidden, document.activeElement.id, document.activeElement.value, document.activeElement.selectionStart, document.activeElement.selectionEnd])'),
     JSON.stringify([false, "typing", "Personal text", 1, 4]));
   assert.equal(activations.length, activationsBefore);
-  await call("close_tab", { tab });
-  assert.deepEqual((await call("list_tabs")).tabs, []);
+  const extra = await call("open_tab", { url: origin + "/done" });
+  assert.equal((await call("list_tabs")).tabs.length, 2);
+  await call("close_tab", { tab: extra.tab });
+  assert.deepEqual((await call("list_tabs")).tabs.map(entry => entry.tab), [tab]);
   assert.equal((await popupCommand({ type: "stop" })).connected, false);
   await poll(() => call("status"), value => !value.connected, "disconnection");
+  assert.deepEqual(await popupCommand({ type: "inspect" }), [{ collapsed: true }]);
+
+  const socket = join(env.CHATGPT_FIREFOX_RUNTIME_DIR, "bridge.sock");
+  await poll(() => lstat(socket).then(() => false, error => {
+    if (error.code !== "ENOENT") throw error;
+    return true;
+  }), Boolean, "the stopped host to release its socket");
+  const blocker = createUnixServer(peer => peer.end());
+  try {
+    await once(blocker.listen(socket), "listening");
+    assert.equal((await popupCommand({ type: "connect" })).ok, true);
+    const unavailable = await poll(() => popupCommand({ type: "status" }), value => value.connection === "unavailable", "the startup failure");
+    assert.equal(unavailable.connected, false);
+    await poll(() => popupCommand({ type: "retry-control" }), value => value.ready, "the enabled retry button");
+  } finally {
+    await new Promise(resolveClose => blocker.close(resolveClose));
+  }
+  assert.equal((await popupCommand({ type: "retry-control", click: true })).ready, true);
+  await poll(() => call("status"), value => value.connected, "a new workspace");
+  assert.deepEqual((await call("status")).approved, []);
+  await call("snapshot", { tab }, "OUT_OF_SCOPE");
+  await popupCommand({ type: "stop" });
   console.log("Firefox " + capabilities.browserVersion + " passed the background workspace test.");
 } catch (error) {
   console.error(error);

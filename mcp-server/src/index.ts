@@ -18,7 +18,7 @@ const descriptions: Record<Method, string> = {
   firefox_close_tab: "Close a background tab opened by this Firefox workspace. Tabs shared by the user stay open.",
 };
 
-const disconnected = () => new OperationError("DISCONNECTED", "Open the Firefox extension and select Connect Codex.");
+const disconnected = () => new OperationError("DISCONNECTED", "The Firefox bridge is unavailable. Check the connection in the Firefox extension.");
 
 async function callFirefox(request: Request): Promise<Response> {
   const path = await socketPath().catch(() => { throw disconnected(); });

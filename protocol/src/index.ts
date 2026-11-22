@@ -4,6 +4,11 @@ export const VERSION = 1;
 export const MAX_FRAME_BYTES = 256 * 1024;
 export const NATIVE_HOST_NAME = "io.github.crystaldaking.chatgpt_firefox";
 export const EXTENSION_ID = "chatgpt-firefox@crystaldaking.github.io";
+export const nativeReady = { kind: "ready", version: VERSION } as const;
+export const nativeReadySchema = z.strictObject({
+  kind: z.literal(nativeReady.kind),
+  version: z.literal(nativeReady.version),
+});
 
 export const toolSchemas = {
   firefox_status: z.strictObject({}),
